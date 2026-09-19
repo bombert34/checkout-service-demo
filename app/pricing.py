@@ -18,5 +18,5 @@ def apply_discount(cart_total: float, code: str) -> float:
     Unknown or empty codes are treated as "no discount" rather than
     an error, so every checkout succeeds regardless of the code sent.
     """
-    rate = DISCOUNTS[code] if code else 0.0
+    rate = DISCOUNTS.get(code, 0.0)
     return round(cart_total * (1 - rate), 2)
