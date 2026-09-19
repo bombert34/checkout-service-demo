@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
 import subprocess
 import time
 import traceback
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,10 +16,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.pricing import apply_discount
+from app.telemetry import Telemetry
+from app.log_records import recent_records
 
 ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = ROOT / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path(os.environ.get('DOX_DATA_DIR', ROOT / 'logs'))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 APP_LOG = LOG_DIR / "app.log"
 DEPLOYS_LOG = LOG_DIR / "deploys.log"
 
@@ -34,8 +37,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 app = FastAPI(title="dox checkout service")
-WINDOW_S = 300
-_events: deque[tuple[float, bool]] = deque()
+telemetry = Telemetry(LOG_DIR / 'telemetry.sqlite3')
 
 
 class CheckoutRequest(BaseModel):
@@ -44,26 +46,11 @@ class CheckoutRequest(BaseModel):
 
 
 def _record(is_error: bool) -> None:
-    now = time.time()
-    _events.append((now, is_error))
-    cutoff = now - WINDOW_S
-    while _events and _events[0][0] < cutoff:
-        _events.popleft()
+    telemetry.record(is_error)
 
 
 def _error_rate(window_s: int) -> dict:
-    now = time.time()
-    cutoff = now - window_s
-    recent = [event for event in _events if event[0] >= cutoff]
-    total = len(recent)
-    errors = sum(1 for _, is_error in recent if is_error)
-    rate = errors / total if total else 0.0
-    return {
-        "window_s": window_s,
-        "requests": total,
-        "errors": errors,
-        "error_rate": round(rate, 4),
-    }
+    return telemetry.metrics(window_s)
 
 
 def _git(*args: str) -> str:
@@ -105,7 +92,7 @@ def checkout(req: CheckoutRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "commit": RUNNING_COMMIT}
 
 
 @app.get("/metrics")
@@ -116,14 +103,23 @@ def metrics(window_s: int = Query(default=60, ge=1, le=300)):
 @app.get("/status-data")
 def status_data():
     metrics_now = _error_rate(60)
-    recent_errors = [line for line in _tail(APP_LOG, 300) if " ERROR " in line][-5:]
+    recent_errors = recent_records(APP_LOG, limit=5)
     deploys = _tail(DEPLOYS_LOG, 5)
+    try:
+        incident = json.loads((LOG_DIR / 'incident.json').read_text(encoding='utf-8'))
+        # Only publish explicitly public progress; never expose monitor calls or arguments.
+        incident = {key: incident[key] for key in ('stage', 'session_id', 'milestones', 'updated_at', 'monitor_error') if key in incident}
+        incident['stale'] = time.time()-incident.get('updated_at', 0) > 20
+    except (OSError, ValueError):
+        incident = {'stage': 'Monitor not started', 'stale': True, 'milestones': []}
     return {
         **metrics_now,
         "commit": RUNNING_COMMIT,
         "commit_message": RUNNING_MESSAGE,
         "deploys": deploys,
         "recent_errors": recent_errors,
+        "history": telemetry.history(),
+        "incident": incident,
         "updated_at": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     }
 

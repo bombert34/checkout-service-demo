@@ -32,6 +32,9 @@
   .chart-label { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; margin-top:7px; }
   .deployment { display:flex; justify-content:space-between; align-items:center; gap:25px; padding:21px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
   .label { color:var(--muted); font-size:12px; }
+  .incident { padding:19px 0; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:20px; }
+  .incident p { font-size:14px; margin-top:4px; }
+  .incident a { color:var(--muted); font-size:12px; white-space:nowrap; }
   .revision { text-align:right; min-width:0; }
   code { font:12px ui-monospace,SFMono-Regular,Consolas,monospace; }
   .commit-message { color:var(--muted); font-size:12px; margin-top:3px; overflow-wrap:anywhere; }
@@ -53,21 +56,22 @@
 </head>
 <body data-state="idle">
 <main>
-  <header><h1 class="wordmark">dox</h1><div class="header-right"><span class="live"><i class="dot" aria-hidden="true"></i><span id="connection">Connecting</span></span><a href="https://github.com/bombert34/checkout-service-demo/pulls" target="_blank" rel="noopener noreferrer">Pull requests ↗</a></div></header>
+  <header><h1 class="wordmark">dox</h1><div class="header-right"><span class="live"><i class="dot" aria-hidden="true"></i><span id="connection">Connecting</span></span></div></header>
   <section class="overview" aria-label="Service health">
     <div class="service-line"><h2>Checkout service</h2><p id="state" class="state" role="status">Waiting for telemetry</p></div>
     <div class="numbers">
       <div><div class="rate"><b id="rate" style="font-weight:inherit">—</b><span>%</span></div><p class="caption">Error rate · last 60 seconds</p></div>
       <div class="stats"><div><span id="requests" class="stat-value">—</span><span class="stat-label">Requests</span></div><div><span id="errors" class="stat-value">—</span><span class="stat-label">Errors</span></div><div><span id="success" class="stat-value">—</span><span class="stat-label">Success rate</span></div></div>
     </div>
-    <div class="chart"><canvas id="chart" role="img" aria-label="Error-rate history since this page opened, up to two minutes"></canvas><div class="chart-label"><span>Rolling error rate · 2-minute view</span><span id="scale">0–50%</span></div></div>
+    <div class="chart"><canvas id="chart" role="img" aria-label="Persistent error-rate history for the last two minutes"></canvas><div class="chart-label"><span>Rolling error rate · 2-minute view</span><span id="scale">0–50%</span></div></div>
   </section>
   <section class="deployment" aria-label="Running revision"><div class="label">Running revision</div><div class="revision"><code id="commit">—</code><div id="commit-message" class="commit-message">Waiting for service</div></div></section>
-  <section class="details" aria-label="Service details"><details><summary>Deployment history</summary><div id="deploys" class="rows"></div></details><details><summary>Error log history</summary><div id="failures" class="rows"></div></details></section>
+  <section class="incident" aria-label="Agent progress"><div><div class="label">Incident response</div><p id="agent-stage" role="status">Connecting to monitor</p></div><a id="agent-link" href="http://localhost:8790" target="_blank" rel="noopener noreferrer">Open TrueForge ↗</a></section>
+  <section class="details" aria-label="Service details"><details><summary>Investigation events</summary><div id="milestones" class="rows"></div></details><details><summary>Deployment history</summary><div id="deploys" class="rows"></div></details><details><summary>Error log history</summary><div id="failures" class="rows"></div></details></section>
   <footer><span>Investigate. Prove. Approve.</span><span id="updated">Updates every 2 seconds</span></footer>
 </main>
 <script>
-const points=[];
+let points=[];
 const chart=document.getElementById('chart');
 const ctx=chart.getContext('2d');
 const el=id=>document.getElementById(id);
@@ -93,15 +97,18 @@ async function refresh(){
   try{
     const response=await fetch('/status-data',{cache:'no-store',signal:controller.signal});if(!response.ok)throw new Error('Telemetry unavailable');
     const d=await response.json();const pct=d.error_rate*100;
-    const mode=d.requests===0?'idle':pct>=10?'incident':pct>=1?'degraded':'healthy';
+    const mode=!d.traffic_active?'idle':pct>=10?'incident':pct>=1?'degraded':'healthy';
     document.body.dataset.state=mode;
     el('connection').textContent='Live';
-    el('state').textContent={idle:'Waiting for traffic',incident:'Elevated errors',degraded:'Degraded',healthy:'Operational'}[mode];
+    el('state').textContent={idle:'Waiting for traffic',incident:'Elevated errors',degraded:'Degraded',healthy:d.recovery_ready?'Operational':'Collecting traffic'}[mode];
     el('rate').textContent=d.requests?pct.toFixed(1):'—';
     el('requests').textContent=d.requests.toLocaleString();el('errors').textContent=d.errors.toLocaleString();el('success').textContent=d.requests?(100-pct).toFixed(1)+'%':'—';
     el('commit').textContent=d.commit;el('commit-message').textContent=d.commit_message;el('updated').textContent='Updated '+d.updated_at;
     rows('deploys',d.deploys,'No deployments recorded.');rows('failures',d.recent_errors,'No errors recorded.');
-    points.push({time:Date.now(),value:d.requests?pct:null});
+    const incident=d.incident||{};
+    el('agent-stage').textContent=incident.stale?'Monitor offline · last state: '+(incident.stage||'unknown'):incident.monitor_error?'Monitor needs attention: '+incident.monitor_error:(incident.stage||'Watching for incidents');
+    rows('milestones',(incident.milestones||[]).map(m=>new Date(m.time).toLocaleTimeString()+' · '+m.label),'No investigation events yet.');
+    points=d.history||[];
   }catch(error){
     document.body.dataset.state='offline';el('connection').textContent='Offline';el('state').textContent='Telemetry unavailable';
     ['rate','requests','errors','success'].forEach(id=>el(id).textContent='—');
